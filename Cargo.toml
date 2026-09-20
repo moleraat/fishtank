@@ -31,3 +31,6 @@ map_err_ignore = "warn"
 await_holding_lock = "warn"
 await_holding_refcell_ref = "warn"
 large_futures = "warn"
+
+[dependencies]
+uuid = "1.26.1"
