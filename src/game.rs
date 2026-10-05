@@ -19,6 +19,7 @@ pub struct Board {
     white_player: PlayerId,
     black_player: PlayerId,
     position: Position,
+    // todo: 3-fold detection
 }
 
 struct Clock {
@@ -30,10 +31,13 @@ struct Team {
     roster: (PlayerId, PlayerId, Vec<PlayerId>),
 }
 
+// todo: refactor
+pub type Reserve = Vec<(PieceKind, Color, u8)>;
+
 struct Player {
     id: PlayerId,
     name: String,
-    reserve: Vec<Piece>,
+    reserve: Reserve,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -130,6 +134,15 @@ impl File {
     }
 }
 
+// todo: move somewhere else?
+enum OpponentState {
+    Chilling,
+    Check,
+    Checkmate,
+    Stalemate,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Piece {
     kind: PieceKind,
     color: Color,
@@ -137,12 +150,29 @@ pub struct Piece {
     promoted: bool,
 }
 impl Piece {
-    pub const fn kind(&self) -> PieceKind {
+    pub const fn new(kind: PieceKind, color: Color, promoted: bool) -> Self {
+        Self {
+            kind,
+            color,
+            moved: false,
+            promoted,
+        }
+    }
+
+    pub const fn kind(self) -> PieceKind {
         self.kind
     }
 
-    pub const fn color(&self) -> Color {
+    pub const fn color(self) -> Color {
         self.color
+    }
+
+    pub const fn moved(self) -> bool {
+        self.moved
+    }
+
+    pub const fn set_moved(&mut self) {
+        self.moved = true;
     }
 }
 
@@ -155,6 +185,16 @@ pub enum PieceKind {
     Rook,
     Queen,
     King,
+}
+impl PieceKind {
+    pub const ALL: [Self; 6] = [
+        Self::Pawn,
+        Self::Bishop,
+        Self::Knight,
+        Self::Rook,
+        Self::Queen,
+        Self::King,
+    ];
 }
 
 // Chess side

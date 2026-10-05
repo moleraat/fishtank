@@ -8,3 +8,9 @@
 - Only have one timer per team? Play serially?
 
 - Allow multiple kings
+
+- Allow illegal moves. Let receiver call out opponent and undo?
+- Go by clock move, not touch move. UI simulates grabbing, swapping, and placing pieces
+
+## Todos
+- I call piece.color() a lot. Prob doing something wrong

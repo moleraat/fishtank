@@ -1,121 +1,192 @@
-use crate::game::{Color, File, Offset, Piece, PieceKind, Rank, Square};
+use crate::game::{Color, File, Offset, Piece, PieceKind, Rank, Reserve, Square};
 
 // Responsible for checking legality of game state -----------------------------
-struct MoveOutcome {
-    start: Square,
-    end: Square,
-    kind: MoveKind,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Move {
+    Board {
+        start: Square,
+        end: Square,
+        move_kind: MoveKind,
+        promo: Option<PieceKind>,
+    },
+    Drop {
+        piece_kind: PieceKind,
+        color: Color,
+        end: Square,
+    },
 }
 
-enum MoveKind {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MoveKind {
     Quiet,
+    Turbo { shadow: Square },
     Capture,
     EnPassant,
     Castle(CastleSide),
-    Promotion(PieceKind),
 }
 
-// todo: move somewhere else?
-enum OpponentState {
-    Chilling,
-    Check,
-    Checkmate,
-    Stalemate,
-}
-
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Position {
     grid: [[Option<Piece>; 8]; 8],
     castle_origins: CastleOrigins,
-    en_passant_shadow: Option<Square>, // one rank behind turboed pawn
+    en_passant_shadow: Option<Square>, // one rank behind turbo pawn
 }
 
 impl Position {
-    pub fn legal_moves(&mut self, start: Square) -> Option<Vec<MoveOutcome>> {
+    // pub fn generate_start(seed: i64) -> Self {}
+
+    pub fn legal_board_moves(&self, start: Square) -> Option<Vec<Move>> {
         let piece = self.cell(start)?;
-        let pseudo_legal = self.moves_ignoring_check(start)?;
+        let pseudo_legal = self.moves_ignoring_check(start, *piece);
 
-        let kings = self.kings(piece.color());
-
-        let mut legal_moves = Vec::with_capacity(128); // todo: need to dedup
+        let pc_color = piece.color();
+        let mut legal_moves = Vec::with_capacity(64);
         for candidate in pseudo_legal {
-            self.apply(candidate);
-            for king in &kings {
-                if self.is_attacked(*king, piece.color().opposite()) {
-                    legal_moves.push(candidate);
-                }
+            let mut next_pos = self.clone();
+
+            _ = next_pos.apply(candidate);
+
+            let kings = next_pos.kings(pc_color);
+            if kings.iter().all(|k| !next_pos.is_attacked(*k, pc_color)) {
+                legal_moves.push(candidate);
             }
         }
-
-        // Some(
-        //     pseudo_legal
-        //         .into_iter()
-        //         .filter(|candidate| {
-        //             let after = self.applied(start, candidate);
-        //             after.kings(color).all(|k| !after.is_attacked(k, color.other()))
-        //         })
-        //         .collect(),
-        // )
 
         Some(legal_moves)
     }
 
-    pub fn apply(&mut self, mv: MoveOutcome) {
-        match mv.kind {
-            MoveKind::Quiet => {
-                // #[expect(clippy::expect_used, reason = "should only be passed valid moves")]
-                let piece = self
-                    .take_cell(mv.start)
+    // todo: need to filter out by checking for check
+    pub fn legal_drop_moves(&self, reserve: &Reserve) -> Vec<Move> {
+        reserve
+            .iter()
+            .flat_map(|(pk, c, _)| self.valid_drops(*pk, *c))
+            .collect()
+    }
+
+    pub fn apply(&mut self, mv: Move) -> Option<Piece> {
+        self.en_passant_shadow = None;
+
+        match mv {
+            Move::Board {
+                start,
+                end,
+                move_kind,
+                promo,
+            } => {
+                #[expect(clippy::expect_used, reason = "should only be passed valid moves")]
+                let mut piece = self
+                    .take_cell(start)
                     .expect("move start must have some piece in quiet");
-                self.set_cell(mv.end, piece);
+                piece.set_moved();
+
+                match move_kind {
+                    MoveKind::Quiet => {
+                        if let Some(promo) = promo {
+                            let promo_piece = Piece::new(promo, piece.color(), true);
+                            self.set_cell(end, promo_piece);
+                        } else {
+                            self.set_cell(end, piece);
+                        }
+
+                        None
+                    }
+
+                    MoveKind::Turbo { shadow } => {
+                        self.set_cell(end, piece);
+                        self.en_passant_shadow = Some(shadow);
+
+                        None
+                    }
+
+                    MoveKind::Capture => {
+                        #[expect(clippy::expect_used, reason = "should only be passed valid moves")]
+                        let end_piece =
+                            self.take_cell(end).expect("end must have piece in capture");
+                        if let Some(promo) = promo {
+                            let promo_piece = Piece::new(promo, piece.color(), true);
+                            self.set_cell(end, promo_piece);
+                        } else {
+                            self.set_cell(end, piece);
+                        }
+
+                        Some(end_piece)
+                    }
+
+                    MoveKind::EnPassant => {
+                        let ep_offset = match piece.color() {
+                            Color::White => Offset::new(-1, 0),
+                            Color::Black => Offset::new(1, 0),
+                        };
+                        #[expect(clippy::expect_used, reason = "should only be passed valid moves")]
+                        let pawn_target = end // end is the shadow
+                            .offset(ep_offset)
+                            .expect("shadow + offset must have piece in en passant");
+                        #[expect(clippy::expect_used, reason = "should only be passed valid moves")]
+                        let end_piece = self
+                            .take_cell(pawn_target)
+                            .expect("move end must have some piece in en passant");
+                        self.set_cell(end, piece);
+
+                        Some(end_piece)
+                    }
+
+                    MoveKind::Castle(castle_side) => {
+                        let back_rank = match piece.color() {
+                            Color::White => Rank::lit(0),
+                            Color::Black => Rank::lit(7),
+                        };
+                        let (rook_start, rook_end) = match castle_side {
+                            CastleSide::ASide => (
+                                Square::new(back_rank, self.castle_origins.a_side_rook),
+                                Square::new(back_rank, castle_side.rook_file()),
+                            ),
+                            CastleSide::HSide => (
+                                Square::new(back_rank, self.castle_origins.h_side_rook),
+                                Square::new(back_rank, castle_side.rook_file()),
+                            ),
+                        };
+                        #[expect(clippy::expect_used, reason = "should only be passed valid moves")]
+                        let mut rook = self
+                            .take_cell(rook_start)
+                            .expect("rook_start must have rook in castle");
+                        rook.set_moved();
+                        self.set_cell(end, piece); // king
+                        self.set_cell(rook_end, rook); // king
+
+                        None
+                    }
+                }
             }
-            MoveKind::Capture => {
-                // #[expect(clippy::expect_used, reason = "should only be passed valid moves")]
-                let piece = self
-                    .take_cell(mv.start)
-                    .expect("move start must have some piece in capture");
-                let end_piece = self
-                    .take_cell(mv.start)
-                    .expect("move end must have some piece in capture");
-                // todo: need to do something with the end_piece, needs to go to reserve
-                self.set_cell(mv.end, piece);
+
+            Move::Drop {
+                piece_kind,
+                color,
+                end,
+            } => {
+                let piece = Piece::new(piece_kind, color, false);
+                self.set_cell(end, piece);
+
+                None
             }
-            MoveKind::EnPassant => {
-                // #[expect(clippy::expect_used, reason = "should only be passed valid moves")]
-                let piece = self
-                    .take_cell(mv.start)
-                    .expect("move start must have some piece in en passant");
-                let end_piece = self
-                    .take_cell(mv.start)
-                    .expect("move end must have some piece in en passant");
-                // todo: need to do something with the end_piece, needs to go to reserve
-                self.set_cell(mv.end, piece); // todo: plus 1?
-            }
-            MoveKind::Castle() => {}
-            MoveKind::Promotion() => {}
         }
     }
 
-    pub fn undo(&mut self, mv: MoveOutcome) {}
-
-    fn moves_ignoring_check(&self, start: Square) -> Option<Vec<MoveOutcome>> {
-        let piece = self.cell(start)?;
-        let moves = match piece.kind() {
+    fn moves_ignoring_check(&self, start: Square, piece: Piece) -> Vec<Move> {
+        match piece.kind() {
             PieceKind::Pawn => self.pawn_moves(start, piece.color()),
-            PieceKind::Bishop => self.slide_moves(start, piece.color(), &Self::BISHOP_SLIDES),
-            PieceKind::Knight => self.step_moves(start, piece.color(), &Self::KNIGHT_OFFSETS),
-            PieceKind::Rook => self.slide_moves(start, piece.color(), &Self::ROOK_SLIDES),
-            PieceKind::Queen => self.slide_moves(start, piece.color(), &Self::QUEEN_SLIDES),
+            PieceKind::Knight => self.step_moves(start, piece.color(), &KNIGHT_OFFSETS),
+            PieceKind::Bishop => self.slide_moves(start, piece.color(), &BISHOP_SLIDES),
+            PieceKind::Rook => self.slide_moves(start, piece.color(), &ROOK_SLIDES),
+            PieceKind::Queen => self.slide_moves(start, piece.color(), &QUEEN_SLIDES),
             PieceKind::King => {
-                let mut moves = self.step_moves(start, piece.color(), &Self::KING_OFFSETS);
-                moves.extend(self.king_moves(start, piece.color()));
+                let mut moves = self.step_moves(start, piece.color(), &KING_OFFSETS);
+                moves.extend(self.king_castle_moves(start, piece.color()));
                 moves
             }
-        };
-
-        Some(moves)
+        }
     }
 
-    fn step_moves(&self, start: Square, color: Color, offsets: &[Offset]) -> Vec<MoveOutcome> {
+    fn step_moves(&self, start: Square, pc_color: Color, offsets: &[Offset]) -> Vec<Move> {
         let mut move_candidates = Vec::with_capacity(16);
         for offset in offsets {
             // check in bounds
@@ -126,17 +197,19 @@ impl Position {
             let end_piece = self.cell(end);
             // check if square open
             if end_piece.is_none() {
-                move_candidates.push(MoveOutcome {
+                move_candidates.push(Move::Board {
                     start,
                     end,
-                    kind: MoveKind::Quiet,
+                    move_kind: MoveKind::Quiet,
+                    promo: None,
                 });
             // check if can capture enemy
-            } else if end_piece.is_some_and(|e_p| e_p.color() != color) {
-                move_candidates.push(MoveOutcome {
+            } else if end_piece.is_some_and(|e_p| e_p.color() != pc_color) {
+                move_candidates.push(Move::Board {
                     start,
                     end,
-                    kind: MoveKind::Capture,
+                    move_kind: MoveKind::Capture,
+                    promo: None,
                 });
             }
         }
@@ -144,30 +217,32 @@ impl Position {
         move_candidates
     }
 
-    fn slide_moves(&self, start: Square, color: Color, dirs: &[Offset]) -> Vec<MoveOutcome> {
+    fn slide_moves(&self, start: Square, pc_color: Color, dirs: &[Offset]) -> Vec<Move> {
         let mut move_candidates = Vec::with_capacity(32);
         for offset in dirs {
             let mut curr_square = start;
 
-            // apply move until OOB or at another piece
+            // apply move until out of bounds or at another piece
             while let Some(end) = curr_square.offset(*offset) {
                 let end_piece = self.cell(end);
                 // empty
                 if end_piece.is_none() {
-                    move_candidates.push(MoveOutcome {
+                    move_candidates.push(Move::Board {
                         start,
                         end,
-                        kind: MoveKind::Quiet,
+                        move_kind: MoveKind::Quiet,
+                        promo: None,
                     });
                 // can take enemy
-                } else if end_piece.is_some_and(|e_p| e_p.color() != color) {
-                    move_candidates.push(MoveOutcome {
+                } else if end_piece.is_some_and(|e_p| e_p.color() != pc_color) {
+                    move_candidates.push(Move::Board {
                         start,
                         end,
-                        kind: MoveKind::Capture,
+                        move_kind: MoveKind::Capture,
+                        promo: None,
                     });
                     break;
-                // blocked by own piece
+                // blocked pc_color own piece
                 } else {
                     break;
                 }
@@ -179,11 +254,11 @@ impl Position {
         move_candidates
     }
 
-    fn pawn_moves(&self, start: Square, color: Color) -> Vec<MoveOutcome> {
+    fn pawn_moves(&self, start: Square, pc_color: Color) -> Vec<Move> {
         // promotion is inferred and applied after the fact
         let (rank, _) = start.index();
         let mut moves = Vec::with_capacity(5);
-        let (rank_delta, spawn_rank) = match color {
+        let (rank_delta, spawn_rank) = match pc_color {
             Color::White => (1, 1),
             Color::Black => (-1, 6),
         };
@@ -193,11 +268,7 @@ impl Position {
             .offset(Offset::new(rank_delta, 0))
             .filter(|e| self.cell(*e).is_none())
         {
-            moves.push(MoveOutcome {
-                start,
-                end: one,
-                kind: MoveKind::Quiet,
-            });
+            moves.extend(Self::valid_promos(start, one, MoveKind::Quiet, pc_color));
 
             // turbo
             if rank == spawn_rank
@@ -205,10 +276,11 @@ impl Position {
                     .offset(Offset::new(rank_delta, 0))
                     .filter(|e| self.cell(*e).is_none())
             {
-                moves.push(MoveOutcome {
+                moves.push(Move::Board {
                     start,
                     end: two,
-                    kind: MoveKind::Quiet,
+                    move_kind: MoveKind::Turbo { shadow: one },
+                    promo: None,
                 });
             }
         }
@@ -216,22 +288,24 @@ impl Position {
         // diagonal capture
         for file_delta in [-1, 1] {
             // check in bounds
-            let Some(end) = start.offset(Offset::new(rank_delta, file_delta)) else {
+            let Some(end_shadow) = start.offset(Offset::new(rank_delta, file_delta)) else {
                 continue;
             };
 
             // check diagonal target
-            if self.cell(end).is_some_and(|p| p.color() != color) {
-                moves.push(MoveOutcome {
+            if self.cell(end_shadow).is_some_and(|p| p.color() != pc_color) {
+                moves.extend(Self::valid_promos(
                     start,
-                    end,
-                    kind: MoveKind::Capture,
-                });
-            } else if self.en_passant_shadow == Some(end) {
-                moves.push(MoveOutcome {
+                    end_shadow,
+                    MoveKind::Capture,
+                    pc_color,
+                ));
+            } else if self.en_passant_shadow == Some(end_shadow) {
+                moves.push(Move::Board {
                     start,
-                    end,
-                    kind: MoveKind::EnPassant,
+                    end: end_shadow,
+                    move_kind: MoveKind::EnPassant,
+                    promo: None,
                 });
             }
         }
@@ -239,59 +313,65 @@ impl Position {
         moves
     }
 
-    fn king_moves(&self, start: Square, color: Color) -> Vec<MoveOutcome> {
-        // castle speicifc king moves
+    fn king_castle_moves(&self, start: Square, pc_color: Color) -> Vec<Move> {
+        // king specific castle moves
         let mut moves = Vec::with_capacity(2);
-        let rank = match color {
+        let rank = match pc_color {
             Color::White => Rank::lit(0),
             Color::Black => Rank::lit(7),
         };
         let o = &self.castle_origins;
+        let king_spawn = Square::new(rank, o.king);
 
         let a_rook_ok = self
             .cell(Square::new(rank, o.a_side_rook))
-            .is_some_and(|p| p.color() == color && p.kind() == PieceKind::Rook);
-        let king_ok = self
-            .cell(Square::new(rank, o.king))
-            .is_some_and(|p| p.color() == color && p.kind() == PieceKind::King);
+            .is_some_and(|p| p.color() == pc_color && p.kind() == PieceKind::Rook && !p.moved());
+        let king_ok = king_spawn == start
+            && self.cell(king_spawn).is_some_and(|p| {
+                p.color() == pc_color && p.kind() == PieceKind::King && !p.moved()
+            });
         let h_rook_ok = self
             .cell(Square::new(rank, o.h_side_rook))
-            .is_some_and(|p| p.color() == color && p.kind() == PieceKind::Rook);
+            .is_some_and(|p| p.color() == pc_color && p.kind() == PieceKind::Rook && !p.moved());
 
         let exempt = [o.a_side_rook, o.king];
         if a_rook_ok
             && king_ok
             && self.rank_clear(rank, o.a_side_rook, CastleSide::ASide.rook_file(), exempt)
             && self.rank_clear(rank, o.king, CastleSide::ASide.king_file(), exempt)
+            && !self.span_attacked(rank, o.king, CastleSide::ASide.king_file(), pc_color)
         {
-            moves.push(MoveOutcome {
+            moves.push(Move::Board {
                 start,
                 end: Square::new(rank, CastleSide::ASide.king_file()),
-                kind: MoveKind::Castle(CastleSide::ASide),
+                move_kind: MoveKind::Castle(CastleSide::ASide),
+                promo: None,
             });
         }
 
         let exempt = [o.king, o.h_side_rook];
-        if king_ok
-            && h_rook_ok
-            && self.rank_clear(rank, o.king, CastleSide::HSide.king_file(), exempt)
+        if h_rook_ok
+            && king_ok
             && self.rank_clear(rank, o.h_side_rook, CastleSide::HSide.rook_file(), exempt)
+            && self.rank_clear(rank, o.king, CastleSide::HSide.king_file(), exempt)
+            && !self.span_attacked(rank, o.king, CastleSide::HSide.king_file(), pc_color)
         {
-            moves.push(MoveOutcome {
+            moves.push(Move::Board {
                 start,
                 end: Square::new(rank, CastleSide::HSide.king_file()),
-                kind: MoveKind::Castle(CastleSide::HSide),
+                move_kind: MoveKind::Castle(CastleSide::HSide),
+                promo: None,
             });
         }
 
         moves
     }
 
-    fn is_attacked(&self, start: Square, color: Color) -> bool {
+    fn is_attacked(&self, start: Square, pc_color: Color) -> bool {
         // PAWN
-        let rank_delta = match color {
-            Color::White => -1,
-            Color::Black => 1,
+        let rank_delta = match pc_color {
+            Color::White => 1,
+            Color::Black => -1,
         };
         for file_delta in [-1, 1] {
             // check in bounds
@@ -300,13 +380,16 @@ impl Position {
             };
 
             // check diagonal target
-            if self.cell(end).is_some_and(|p| p.color() != color) {
+            if self
+                .cell(end)
+                .is_some_and(|p| p.color() != pc_color && p.kind() == PieceKind::Pawn)
+            {
                 return true;
             }
         }
 
         // KNIGHT, KING
-        for (piece_offsets, piece_kind) in Self::STEP_ATTACKS {
+        for (piece_offsets, piece_kind) in STEP_ATTACKS {
             for offset in piece_offsets {
                 // check in bounds
                 let Some(end) = start.offset(*offset) else {
@@ -315,26 +398,28 @@ impl Position {
 
                 // check if enemy piece is attacking
                 let end_piece = self.cell(end);
-                if end_piece.is_some_and(|e_p| e_p.color() != color && e_p.kind() == piece_kind) {
+                if end_piece.is_some_and(|e_p| e_p.color() != pc_color && e_p.kind() == piece_kind)
+                {
                     return true;
                 }
             }
         }
 
         // BISHOP, ROOK, QUEEN
-        for (piece_offsets, is_piece) in Self::SLIDE_ATTACKS {
+        for (piece_offsets, is_piece) in SLIDE_ATTACKS {
             for offset in piece_offsets {
                 let mut curr_square = start;
 
-                // apply move until OOB or at another piece
+                // apply move until out of bounds or at another piece
                 while let Some(end) = curr_square.offset(*offset) {
                     let end_piece = self.cell(end);
 
                     // check if enemy piece is attacking
-                    if end_piece.is_some_and(|e_p| e_p.color() != color && is_piece(e_p.kind())) {
+                    if end_piece.is_some_and(|e_p| e_p.color() != pc_color && is_piece(e_p.kind()))
+                    {
                         return true;
-                    // blocked by own piece
-                    } else if end_piece.is_some_and(|e_p| e_p.color() == color) {
+                    // blocked by own or other piece
+                    } else if end_piece.is_some() {
                         break;
                     }
 
@@ -372,14 +457,20 @@ impl Position {
             .all(|f| self.cell(Square::new(rank, f)).is_none() || exempt.contains(&f))
     }
 
-    fn kings(&self, color: Color) -> Vec<Square> {
+    fn span_attacked(&self, rank: Rank, from: File, to: File, pc_color: Color) -> bool {
+        from.span(to)
+            .any(|f| self.is_attacked(Square::new(rank, f), pc_color))
+    }
+
+    // todo: refactor
+    fn kings(&self, pc_color: Color) -> Vec<Square> {
         let mut kings = Vec::with_capacity(2);
         for rank in 0..=7u8 {
             for file in 0..=7u8 {
                 let square = Square::new(Rank::lit(rank), File::lit(file));
                 let piece = self.cell(square);
                 if let Some(piece) = piece
-                    && piece.color() == color
+                    && piece.color() == pc_color
                     && matches!(piece.kind(), PieceKind::King)
                 {
                     kings.push(square);
@@ -387,66 +478,66 @@ impl Position {
             }
         }
 
+        assert!(!kings.is_empty(), "Side must have >= 1 King");
         kings
     }
 
-    const STEP_ATTACKS: [(&[Offset], PieceKind); 2] = [
-        (&Self::KING_OFFSETS, PieceKind::King),
-        (&Self::KNIGHT_OFFSETS, PieceKind::Knight),
-    ];
-    const SLIDE_ATTACKS: [(&[Offset], fn(PieceKind) -> bool); 2] = [
-        (&Self::BISHOP_SLIDES, |k| {
-            matches!(k, PieceKind::Bishop | PieceKind::Queen)
-        }),
-        (&Self::ROOK_SLIDES, |k| {
-            matches!(k, PieceKind::Rook | PieceKind::Queen)
-        }),
-    ];
-    const KNIGHT_OFFSETS: [Offset; 8] = [
-        Offset::new(2, -1),
-        Offset::new(2, 1),
-        Offset::new(1, 2),
-        Offset::new(-1, 2),
-        Offset::new(-2, 1),
-        Offset::new(-2, -1),
-        Offset::new(-1, -2),
-        Offset::new(1, -2),
-    ];
-    const BISHOP_SLIDES: [Offset; 4] = [
-        Offset::new(1, 1),
-        Offset::new(1, -1),
-        Offset::new(-1, 1),
-        Offset::new(-1, -1),
-    ];
-    const ROOK_SLIDES: [Offset; 4] = [
-        Offset::new(1, 0),
-        Offset::new(-1, 0),
-        Offset::new(0, 1),
-        Offset::new(0, -1),
-    ];
-    const QUEEN_SLIDES: [Offset; 8] = [
-        Offset::new(1, 0),
-        Offset::new(-1, 0),
-        Offset::new(0, 1),
-        Offset::new(0, -1),
-        Offset::new(1, 1),
-        Offset::new(1, -1),
-        Offset::new(-1, 1),
-        Offset::new(-1, -1),
-    ];
-    const KING_OFFSETS: [Offset; 8] = [
-        Offset::new(1, 0),
-        Offset::new(1, 1),
-        Offset::new(0, 1),
-        Offset::new(-1, 1),
-        Offset::new(-1, 0),
-        Offset::new(-1, -1),
-        Offset::new(0, -1),
-        Offset::new(1, -1),
-    ];
+    fn valid_promos(start: Square, end: Square, kind: MoveKind, pc_color: Color) -> Vec<Move> {
+        let (opp_back_rank, _) = end.index();
+        let mut moves = Vec::with_capacity(8);
+
+        let can_promo = match pc_color {
+            Color::White => opp_back_rank == 7,
+            Color::Black => opp_back_rank == 0,
+        };
+        if can_promo {
+            for piece in PieceKind::ALL {
+                moves.push(Move::Board {
+                    start,
+                    end,
+                    move_kind: kind,
+                    promo: Some(piece),
+                });
+            }
+        } else {
+            moves.push(Move::Board {
+                start,
+                end,
+                move_kind: kind,
+                promo: None,
+            });
+        }
+
+        moves
+    }
+
+    // todo: refactor
+    fn valid_drops(&self, piece_kind: PieceKind, color: Color) -> Vec<Move> {
+        let (start_rank, end_rank): (u8, u8) = match piece_kind {
+            PieceKind::Pawn => (1, 6),
+            _ => (0, 7),
+        };
+        let mut empties = Vec::with_capacity(64);
+        for rank in start_rank..=end_rank {
+            for file in 0..=7u8 {
+                let square = Square::new(Rank::lit(rank), File::lit(file));
+                let piece_opt = self.cell(square);
+                if piece_opt.is_none() {
+                    empties.push(Move::Drop {
+                        piece_kind,
+                        color,
+                        end: square,
+                    });
+                }
+            }
+        }
+
+        empties
+    }
 }
 
-enum CastleSide {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CastleSide {
     ASide,
     HSide,
 }
@@ -467,8 +558,67 @@ impl CastleSide {
 }
 
 // Spawn info for setup and castling
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct CastleOrigins {
     a_side_rook: File,
     king: File,
     h_side_rook: File,
 }
+
+const STEP_ATTACKS: [(&[Offset], PieceKind); 2] = [
+    (&KING_OFFSETS, PieceKind::King),
+    (&KNIGHT_OFFSETS, PieceKind::Knight),
+];
+
+type IsPieceKind = fn(PieceKind) -> bool;
+const SLIDE_ATTACKS: [(&[Offset], IsPieceKind); 2] = [
+    (&BISHOP_SLIDES, |k| {
+        matches!(k, PieceKind::Bishop | PieceKind::Queen)
+    }),
+    (&ROOK_SLIDES, |k| {
+        matches!(k, PieceKind::Rook | PieceKind::Queen)
+    }),
+];
+
+const KNIGHT_OFFSETS: [Offset; 8] = [
+    Offset::new(2, -1),
+    Offset::new(2, 1),
+    Offset::new(1, 2),
+    Offset::new(-1, 2),
+    Offset::new(-2, 1),
+    Offset::new(-2, -1),
+    Offset::new(-1, -2),
+    Offset::new(1, -2),
+];
+const BISHOP_SLIDES: [Offset; 4] = [
+    Offset::new(1, 1),
+    Offset::new(1, -1),
+    Offset::new(-1, 1),
+    Offset::new(-1, -1),
+];
+const ROOK_SLIDES: [Offset; 4] = [
+    Offset::new(1, 0),
+    Offset::new(-1, 0),
+    Offset::new(0, 1),
+    Offset::new(0, -1),
+];
+const QUEEN_SLIDES: [Offset; 8] = [
+    Offset::new(1, 0),
+    Offset::new(-1, 0),
+    Offset::new(0, 1),
+    Offset::new(0, -1),
+    Offset::new(1, 1),
+    Offset::new(1, -1),
+    Offset::new(-1, 1),
+    Offset::new(-1, -1),
+];
+const KING_OFFSETS: [Offset; 8] = [
+    Offset::new(1, 0),
+    Offset::new(1, 1),
+    Offset::new(0, 1),
+    Offset::new(-1, 1),
+    Offset::new(-1, 0),
+    Offset::new(-1, -1),
+    Offset::new(0, -1),
+    Offset::new(1, -1),
+];
