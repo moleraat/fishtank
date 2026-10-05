@@ -33,33 +33,47 @@ pub struct Position {
 }
 
 impl Position {
-    // pub fn generate_start(seed: i64) -> Self {}
+    pub fn generate_start(seed: u64) -> Self {
+        
+    }
 
     pub fn legal_board_moves(&self, start: Square) -> Option<Vec<Move>> {
         let piece = self.cell(start)?;
-        let pseudo_legal = self.moves_ignoring_check(start, *piece);
+        let pseudo_legal = self.moves_ignoring_check(start, piece);
 
         let pc_color = piece.color();
-        let mut legal_moves = Vec::with_capacity(64);
-        for candidate in pseudo_legal {
-            let mut next_pos = self.clone();
-
-            _ = next_pos.apply(candidate);
-
-            let kings = next_pos.kings(pc_color);
-            if kings.iter().all(|k| !next_pos.is_attacked(*k, pc_color)) {
-                legal_moves.push(candidate);
-            }
-        }
-
-        Some(legal_moves)
+        // filter out illegal moves that have king(s) in check
+        Some(
+            pseudo_legal
+                .into_iter()
+                .filter(|mv| {
+                    let mut next_pos = self.clone();
+                    _ = next_pos.apply(*mv);
+                    next_pos
+                        .kings(pc_color)
+                        .iter()
+                        .all(|k| !next_pos.is_attacked(*k, pc_color))
+                })
+                .collect(),
+        )
     }
 
-    // todo: need to filter out by checking for check
-    pub fn legal_drop_moves(&self, reserve: &Reserve) -> Vec<Move> {
-        reserve
+    pub fn legal_drop_moves(&self, reserve: &Reserve, pc_color: Color) -> Vec<Move> {
+        let pseudo_legal = reserve
             .iter()
-            .flat_map(|(pk, c, _)| self.valid_drops(*pk, *c))
+            .flat_map(|(pk, c, _)| self.possible_drops(*pk, *c));
+
+        // filter out illegal moves that have king(s) in check
+        pseudo_legal
+            .into_iter()
+            .filter(|mv| {
+                let mut next_pos = self.clone();
+                _ = next_pos.apply(*mv);
+                next_pos
+                    .kings(pc_color)
+                    .iter()
+                    .all(|k| !next_pos.is_attacked(*k, pc_color))
+            })
             .collect()
     }
 
@@ -268,7 +282,7 @@ impl Position {
             .offset(Offset::new(rank_delta, 0))
             .filter(|e| self.cell(*e).is_none())
         {
-            moves.extend(Self::valid_promos(start, one, MoveKind::Quiet, pc_color));
+            moves.extend(Self::possible_promos(start, one, MoveKind::Quiet, pc_color));
 
             // turbo
             if rank == spawn_rank
@@ -294,7 +308,7 @@ impl Position {
 
             // check diagonal target
             if self.cell(end_shadow).is_some_and(|p| p.color() != pc_color) {
-                moves.extend(Self::valid_promos(
+                moves.extend(Self::possible_promos(
                     start,
                     end_shadow,
                     MoveKind::Capture,
@@ -431,11 +445,10 @@ impl Position {
         false
     }
 
-    fn cell(&self, square: Square) -> Option<&Piece> {
+    fn cell(&self, square: Square) -> Option<Piece> {
         let (rank, file) = square.index();
         #[expect(clippy::indexing_slicing, reason = "Square must be 0..=7")]
-        let cell = &self.grid[rank][file];
-        cell.as_ref()
+        self.grid[rank][file]
     }
 
     fn take_cell(&mut self, square: Square) -> Option<Piece> {
@@ -482,7 +495,7 @@ impl Position {
         kings
     }
 
-    fn valid_promos(start: Square, end: Square, kind: MoveKind, pc_color: Color) -> Vec<Move> {
+    fn possible_promos(start: Square, end: Square, kind: MoveKind, pc_color: Color) -> Vec<Move> {
         let (opp_back_rank, _) = end.index();
         let mut moves = Vec::with_capacity(8);
 
@@ -512,7 +525,7 @@ impl Position {
     }
 
     // todo: refactor
-    fn valid_drops(&self, piece_kind: PieceKind, color: Color) -> Vec<Move> {
+    fn possible_drops(&self, piece_kind: PieceKind, color: Color) -> Vec<Move> {
         let (start_rank, end_rank): (u8, u8) = match piece_kind {
             PieceKind::Pawn => (1, 6),
             _ => (0, 7),
@@ -602,16 +615,7 @@ const ROOK_SLIDES: [Offset; 4] = [
     Offset::new(0, 1),
     Offset::new(0, -1),
 ];
-const QUEEN_SLIDES: [Offset; 8] = [
-    Offset::new(1, 0),
-    Offset::new(-1, 0),
-    Offset::new(0, 1),
-    Offset::new(0, -1),
-    Offset::new(1, 1),
-    Offset::new(1, -1),
-    Offset::new(-1, 1),
-    Offset::new(-1, -1),
-];
+const QUEEN_SLIDES: [Offset; 8] = KING_OFFSETS; // same 8 directions
 const KING_OFFSETS: [Offset; 8] = [
     Offset::new(1, 0),
     Offset::new(1, 1),
