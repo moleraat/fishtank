@@ -37,47 +37,60 @@ pub struct Position {
 }
 
 impl Position {
-    pub fn generate_start(index: StartIndex) -> Self {
+    pub fn generate_start(fish_index: FisherIndex) -> Self {
+        #[expect(clippy::indexing_slicing, reason = "File is 0..=7 by construction")]
+        fn set_back_rank(back_rank: &mut [Option<PieceKind>; 8], f: File, kind: PieceKind) {
+            back_rank[f.index()] = Some(kind);
+        }
+
         // mixed radix decoding from index
         let mut back_rank: [Option<PieceKind>; 8] = [None; 8];
 
-        let mut n = usize::from(index.0);
+        let n = usize::from(fish_index.0);
         // place constrained bishops, prevents illegal start
-        let b_0 = n % 4;
-        n /= 4;
-        let b_1 = n % 4;
-        n /= 4;
+        let (b_dk_slot, n) = (n % 4, n / 4);
+        let (b_li_slot, n) = (n % 4, n / 4);
 
-        back_rank[b_0 * 2] = Some(Bishop);
-        back_rank[(b_1 * 2) + 1] = Some(Bishop);
+        #[expect(clippy::unreachable, reason = "b_dk_slot, b_li_slot < 4 by mod")]
+        let (Some(&b_dk_file), Some(&b_li_file)) =
+            (EVEN_FILES.get(b_dk_slot), ODD_FILES.get(b_li_slot))
+        else {
+            unreachable!("bishop slots must be < 4")
+        };
 
-        let mut empty: Vec<File> = (0..=7)
-            .filter(|&f| back_rank[f].is_none())
-            .map(|f| File::lit(f as u8))
+        set_back_rank(&mut back_rank, b_dk_file, Bishop);
+        set_back_rank(&mut back_rank, b_li_file, Bishop);
+
+        let mut empty: Vec<File> = ALL_FILES
+            .into_iter()
+            .zip(back_rank)
+            .filter_map(|(f, p)| p.is_none().then_some(f))
             .collect();
+
         // place queen
-        let q = n % 6;
-        n /= 6;
-        back_rank[empty[q]] = Some(Queen);
-        empty.remove(q);
+        let (q_slot, n) = (n % 6, n / 6);
+        set_back_rank(&mut back_rank, empty.remove(q_slot), Queen);
 
         // place knights
-        let (n_0, n_1) = KNIGHT_START_TABLE[n];
-        back_rank[empty[n_0]] = Some(Knight);
-        back_rank[empty[n_1]] = Some(Knight);
-        empty.remove(n_1);
-        empty.remove(n_0);
+        #[expect(clippy::unreachable, reason = "n < 10")]
+        let Some(&(kn_0_slot, kn_1_slot)) = KNIGHT_START_TABLE.get(n) else {
+            unreachable!("only 10 knight entries, n must be < 10")
+        };
+        set_back_rank(&mut back_rank, empty.remove(kn_1_slot), Knight);
+        set_back_rank(&mut back_rank, empty.remove(kn_0_slot), Knight);
 
         // place rook, king, rook
-        let [r_0, k, r_1]: [File; 3] = empty
-            .try_into()
-            .expect("must have 3 indices left for r, k, r");
-        back_rank[r_0] = Some(Rook);
-        back_rank[k] = Some(King);
-        back_rank[r_1] = Some(Rook);
+        #[expect(clippy::unreachable, reason = "empty.len() == 3")]
+        let [r_0_file, k_file, r_1_file] = empty[..] else {
+            unreachable!("3 files must remain")
+        };
+        set_back_rank(&mut back_rank, r_0_file, Rook);
+        set_back_rank(&mut back_rank, k_file, King);
+        set_back_rank(&mut back_rank, r_1_file, Rook);
 
         // fill board
-        let back_rank: [PieceKind; 8] = back_rank.map(|p| p.expect("back rank filled"));
+        #[expect(clippy::unwrap_used, reason = "back rank must be filled")]
+        let back_rank: [PieceKind; 8] = back_rank.map(|p| p.unwrap());
         let back = |c| back_rank.map(|p_k| Some(Piece::new(p_k, c, false)));
         let pawns = |c| [Some(Piece::new(Pawn, c, false)); 8];
         let grid = [
@@ -94,9 +107,9 @@ impl Position {
         Self {
             grid,
             castle_origins: CastleOrigins {
-                a_side_rook: File::lit(r_0 as u8),
-                king: File::lit(k as u8),
-                h_side_rook: File::lit(r_1 as u8),
+                a_side_rook: r_0_file,
+                king: k_file,
+                h_side_rook: r_1_file,
             },
             en_passant_shadow: None,
         }
@@ -693,8 +706,8 @@ const KING_OFFSETS: [Offset; 8] = [
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct StartIndex(u16);
-impl StartIndex {
+pub struct FisherIndex(u16);
+impl FisherIndex {
     pub const fn new(x: u16) -> Result<Self, &'static str> {
         if x >= 960 {
             return Err("x must be 0..960");
@@ -704,6 +717,18 @@ impl StartIndex {
     }
 }
 
+const ALL_FILES: [File; 8] = [
+    File::lit(0),
+    File::lit(1),
+    File::lit(2),
+    File::lit(3),
+    File::lit(4),
+    File::lit(5),
+    File::lit(6),
+    File::lit(7),
+];
+const EVEN_FILES: [File; 4] = [File::lit(0), File::lit(2), File::lit(4), File::lit(6)];
+const ODD_FILES: [File; 4] = [File::lit(1), File::lit(3), File::lit(5), File::lit(7)];
 const KNIGHT_START_TABLE: [(usize, usize); 10] = [
     (0, 1),
     (0, 2),
@@ -716,3 +741,12 @@ const KNIGHT_START_TABLE: [(usize, usize); 10] = [
     (2, 4),
     (3, 4),
 ];
+const _: () = {
+    let mut i = 0;
+    while i < KNIGHT_START_TABLE.len() {
+        #[expect(clippy::indexing_slicing, reason = "i < len, guarded by the loop")]
+        let (lo, hi) = KNIGHT_START_TABLE[i];
+        assert!(lo < hi, "knight table entries must be ascending");
+        i += 1;
+    }
+};
