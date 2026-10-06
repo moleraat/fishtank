@@ -1,4 +1,8 @@
-use crate::game::{Color, File, Offset, Piece, PieceKind, Rank, Reserve, Square};
+use crate::game::{
+    Color, File, Offset, Piece,
+    PieceKind::{self, Bishop, King, Knight, Pawn, Queen, Rook},
+    Rank, Reserve, Square,
+};
 
 // Responsible for checking legality of game state -----------------------------
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,8 +37,69 @@ pub struct Position {
 }
 
 impl Position {
-    pub fn generate_start(seed: u64) -> Self {
-        
+    pub fn generate_start(index: StartIndex) -> Self {
+        // mixed radix decoding from index
+        let mut back_rank: [Option<PieceKind>; 8] = [None; 8];
+
+        let mut n = usize::from(index.0);
+        // place constrained bishops, prevents illegal start
+        let b_0 = n % 4;
+        n /= 4;
+        let b_1 = n % 4;
+        n /= 4;
+
+        back_rank[b_0 * 2] = Some(Bishop);
+        back_rank[(b_1 * 2) + 1] = Some(Bishop);
+
+        let mut empty: Vec<File> = (0..=7)
+            .filter(|&f| back_rank[f].is_none())
+            .map(|f| File::lit(f as u8))
+            .collect();
+        // place queen
+        let q = n % 6;
+        n /= 6;
+        back_rank[empty[q]] = Some(Queen);
+        empty.remove(q);
+
+        // place knights
+        let (n_0, n_1) = KNIGHT_START_TABLE[n];
+        back_rank[empty[n_0]] = Some(Knight);
+        back_rank[empty[n_1]] = Some(Knight);
+        empty.remove(n_1);
+        empty.remove(n_0);
+
+        // place rook, king, rook
+        let [r_0, k, r_1]: [File; 3] = empty
+            .try_into()
+            .expect("must have 3 indices left for r, k, r");
+        back_rank[r_0] = Some(Rook);
+        back_rank[k] = Some(King);
+        back_rank[r_1] = Some(Rook);
+
+        // fill board
+        let back_rank: [PieceKind; 8] = back_rank.map(|p| p.expect("back rank filled"));
+        let back = |c| back_rank.map(|p_k| Some(Piece::new(p_k, c, false)));
+        let pawns = |c| [Some(Piece::new(Pawn, c, false)); 8];
+        let grid = [
+            back(Color::White),
+            pawns(Color::White),
+            [None; 8],
+            [None; 8],
+            [None; 8],
+            [None; 8],
+            pawns(Color::Black),
+            back(Color::Black),
+        ];
+
+        Self {
+            grid,
+            castle_origins: CastleOrigins {
+                a_side_rook: File::lit(r_0 as u8),
+                king: File::lit(k as u8),
+                h_side_rook: File::lit(r_1 as u8),
+            },
+            en_passant_shadow: None,
+        }
     }
 
     pub fn legal_board_moves(&self, start: Square) -> Option<Vec<Move>> {
@@ -625,4 +690,29 @@ const KING_OFFSETS: [Offset; 8] = [
     Offset::new(-1, -1),
     Offset::new(0, -1),
     Offset::new(1, -1),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StartIndex(u16);
+impl StartIndex {
+    pub const fn new(x: u16) -> Result<Self, &'static str> {
+        if x >= 960 {
+            return Err("x must be 0..960");
+        }
+
+        Ok(Self(x))
+    }
+}
+
+const KNIGHT_START_TABLE: [(usize, usize); 10] = [
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (0, 4),
+    (1, 2),
+    (1, 3),
+    (1, 4),
+    (2, 3),
+    (2, 4),
+    (3, 4),
 ];
